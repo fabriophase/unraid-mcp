@@ -18,18 +18,18 @@ QUERIES: dict[str, str] = {
     "overview": """
         query GetSystemInfo {
           info {
-            os { platform distro release codename kernel arch hostname codepage logofile serial build uptime }
+            os { platform distro release codename kernel arch hostname fqdn logofile serial build uptime uefi }
             cpu { manufacturer brand vendor family model stepping revision voltage speed speedmin speedmax threads cores processors socket cache flags }
             memory {
               layout { bank type clockSpeed formFactor manufacturer partNum serialNum }
             }
             baseboard { manufacturer model version serial assetTag }
             system { manufacturer model version serial uuid sku }
-            versions { kernel openssl systemOpenssl systemOpensslLib node v8 npm yarn pm2 gulp grunt git tsc mysql redis mongodb apache nginx php docker postfix postgresql perl python gcc unraid }
-            apps { installed started }
+            versions { core { unraid api kernel } packages { openssl node npm pm2 git nginx php docker } }
             machineId
             time
           }
+          docker { containers { state } }
         }
     """,
     "array": """
@@ -87,7 +87,13 @@ QUERIES: dict[str, str] = {
     """,
     "metrics": """
         query GetMetrics {
-          metrics { cpu { used } memory { used total } }
+          metrics {
+            cpu { percentTotal cpus { percentTotal } }
+            memory {
+              total used free available active buffcache percentTotal
+              swapTotal swapUsed swapFree percentSwapTotal
+            }
+          }
         }
     """,
     "services": """
@@ -122,7 +128,7 @@ QUERIES: dict[str, str] = {
         query GetServer {
           info {
             os { hostname uptime }
-            versions { unraid }
+            versions { core { unraid } }
             machineId time
           }
           array { state }
@@ -183,7 +189,18 @@ assert set(QUERIES.keys()) == set(INFO_ACTIONS.__args__), (
 )
 
 
-def _process_system_info(raw_info: dict[str, Any]) -> dict[str, Any]:
+def _count_running(containers: list[dict[str, Any]]) -> int:
+    """Count containers in the RUNNING state.
+
+    `DockerContainer.state` is the ContainerState enum, so it serializes
+    UPPERCASE (RUNNING / EXITED). Normalize before comparing.
+    """
+    return sum(1 for c in containers if str(c.get("state") or "").upper() == "RUNNING")
+
+
+def _process_system_info(
+    raw_info: dict[str, Any], containers: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Process raw system info into summary + details."""
     summary: dict[str, Any] = {}
     if raw_info.get("os"):
@@ -213,11 +230,18 @@ def _process_system_info(raw_info: dict[str, Any]) -> dict[str, Any]:
                 f"Part: {stick.get('partNum', '?')}"
             )
         summary["memory_summary"] = (
-            "Stick layout details retrieved. Overall total/used/free memory stats "
-            "are unavailable due to API limitations."
+            "Stick layout details retrieved. Use the 'metrics' action for live "
+            "total/used/available memory."
         )
     else:
         summary["memory_summary"] = "Memory information not available."
+
+    if containers is not None:
+        running = _count_running(containers)
+        summary["containers"] = (
+            f"{running} running / {len(containers)} total "
+            f"({len(containers) - running} not running)"
+        )
 
     return {"summary": summary, "details": raw_info}
 
@@ -386,7 +410,8 @@ def register_info_tool(mcp: FastMCP) -> None:
                 raw = data.get("info") or {}
                 if not raw:
                     raise ToolError("No system info returned from Unraid API")
-                return _process_system_info(raw)
+                containers = (data.get("docker") or {}).get("containers")
+                return _process_system_info(raw, containers)
 
             if action == "array":
                 raw = data.get("array") or {}

@@ -103,7 +103,7 @@ async def _comprehensive_check() -> dict[str, Any]:
         query ComprehensiveHealthCheck {
           info {
             machineId time
-            versions { unraid }
+            versions { core { unraid } }
             os { uptime }
           }
           array { state }
@@ -112,6 +112,10 @@ async def _comprehensive_check() -> dict[str, Any]:
           }
           docker {
             containers(skipCache: true) { id state status }
+          }
+          metrics {
+            cpu { percentTotal }
+            memory { total used available percentTotal swapTotal swapFree }
           }
         }
         """
@@ -137,7 +141,7 @@ async def _comprehensive_check() -> dict[str, Any]:
                 "status": "connected",
                 "url": UNRAID_API_URL,
                 "machine_id": info.get("machineId"),
-                "version": info.get("versions", {}).get("unraid"),
+                "version": info.get("versions", {}).get("core", {}).get("unraid"),
                 "uptime": info.get("os", {}).get("uptime"),
             }
         else:
@@ -177,11 +181,42 @@ async def _comprehensive_check() -> dict[str, Any]:
         docker = data.get("docker", {})
         if docker and docker.get("containers"):
             containers = docker["containers"]
+            running = sum(
+                1 for c in containers if str(c.get("state") or "").upper() == "RUNNING"
+            )
             health_info["docker_services"] = {
                 "total": len(containers),
-                "running": len([c for c in containers if c.get("state") == "running"]),
-                "stopped": len([c for c in containers if c.get("state") == "exited"]),
+                "running": running,
+                "stopped": len(containers) - running,
             }
+
+        # Host resources
+        metrics = data.get("metrics") or {}
+        if metrics:
+            mem = metrics.get("memory") or {}
+            cpu = metrics.get("cpu") or {}
+            total = mem.get("total")
+            available = mem.get("available")
+            health_info["host_resources"] = {
+                "cpu_percent": cpu.get("percentTotal"),
+                "memory_total_bytes": total,
+                "memory_used_bytes": mem.get("used"),
+                "memory_available_bytes": available,
+                "memory_percent_used": mem.get("percentTotal"),
+                "swap_total_bytes": mem.get("swapTotal"),
+                "note": (
+                    "memory_available_bytes is the headroom figure; "
+                    "memory_used_bytes includes reclaimable buffers/cache."
+                ),
+            }
+            if total and available is not None:
+                if available < total * 0.08:
+                    _escalate("warning")
+                    issues.append(
+                        f"Low memory headroom: {available / 1024**3:.1f} GiB available"
+                    )
+            if not mem.get("swapTotal"):
+                health_info["host_resources"]["swap"] = "none configured"
 
         # Latency assessment
         if api_latency > 10000:

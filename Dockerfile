@@ -15,6 +15,15 @@ COPY README.md .
 # Copy the source code
 COPY unraid_mcp/ ./unraid_mcp/
 
+COPY LICENSE .
+
+# Pin the interpreter uv provisions. requires-python is >=3.12, so the 3.11
+# base image above is never used and uv downloads its own CPython; left
+# unpinned it takes the newest, which broke the build on 2026-10-31 when
+# CPython 3.15 appeared and httptools 0.7.1 had no cp315 wheel (no cc in
+# python:3.11-slim to build one). 3.14 is the version the working image runs.
+ENV UV_PYTHON=3.14
+
 # Install dependencies and the package
 RUN uv sync --frozen
 
