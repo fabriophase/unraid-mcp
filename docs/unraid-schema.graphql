@@ -1105,7 +1105,9 @@ type DockerMutations {
   removeContainer(id: PrefixedID!): Boolean!
   updateContainer(id: PrefixedID!): DockerContainer!
   updateAllContainers: [DockerContainer!]!
-  logs(id: PrefixedID!, tail: Int): String
+  # NOTE: logs field is documented but NOT present in Unraid 7.2 API (v4.28.2).
+  # Container logs are fetched via Docker Engine API socket instead.
+  # logs(id: PrefixedID!, tail: Int): String
 }
 
 type DockerNetwork implements Node {
@@ -1132,7 +1134,9 @@ type Docker implements Node {
   networks(skipCache: Boolean! = false): [DockerNetwork!]!
   portConflicts: [PortConflict!]
   containerUpdateStatuses: [ContainerUpdateStatus!]
-  logs(id: PrefixedID!, tail: Int): String
+  # NOTE: logs field is documented but NOT present in Unraid 7.2 API (v4.28.2).
+  # Container logs are fetched via Docker Engine API socket instead.
+  # logs(id: PrefixedID!, tail: Int): String
 }
 
 type VmDomain implements Node {

@@ -2,16 +2,23 @@
 
 Provides the `unraid_docker` tool with 15 actions for container lifecycle,
 logs, networks, and update management.
+
+Note: Container logs are fetched via the Docker Engine API (socket) because
+the Unraid GraphQL API (v4.28.2 / Unraid 7.2) does not expose a `logs`
+field on the Docker query or mutation types.
 """
 
 import re
 from typing import Any, Literal
 
+import httpx
 from fastmcp import FastMCP
 
 from ..config.logging import logger
 from ..core.client import make_graphql_request
 from ..core.exceptions import ToolError
+
+DOCKER_SOCKET = "/var/run/docker.sock"
 
 
 QUERIES: dict[str, str] = {
@@ -31,11 +38,6 @@ QUERIES: dict[str, str] = {
             hostConfig { networkMode }
             networkSettings mounts autoStart
           } }
-        }
-    """,
-    "logs": """
-        query GetContainerLogs($id: PrefixedID!, $tail: Int) {
-          docker { logs(id: $id, tail: $tail) }
         }
     """,
     "networks": """
@@ -110,7 +112,7 @@ _ACTIONS_REQUIRING_CONTAINER_ID = {
     "details",
     "logs",
 }
-ALL_ACTIONS = set(QUERIES) | set(MUTATIONS) | {"restart"}
+ALL_ACTIONS = set(QUERIES) | set(MUTATIONS) | {"restart", "logs"}
 
 DOCKER_ACTIONS = Literal[
     "list",
@@ -142,6 +144,51 @@ def _safe_get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
             return default
         current = current.get(key)
     return current if current is not None else default
+
+
+def _extract_docker_id(prefixed_id: str) -> str:
+    """Extract the raw Docker container ID from a PrefixedID.
+
+    Unraid PrefixedIDs are formatted as '<server_hash>:<container_hash>'.
+    The Docker Engine API needs just the container hash.
+    """
+    if ":" in prefixed_id:
+        return prefixed_id.split(":", 1)[1]
+    return prefixed_id
+
+
+async def _fetch_logs_via_docker_api(container_id: str, tail: int = 100) -> str:
+    """Fetch container logs directly from the Docker Engine API via socket.
+
+    Args:
+        container_id: Raw Docker container ID (64 hex chars).
+        tail: Number of lines from the end of the log.
+
+    Returns:
+        Log output as a string.
+    """
+    transport = httpx.AsyncHTTPTransport(uds=DOCKER_SOCKET)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
+        resp = await client.get(
+            f"/containers/{container_id}/logs",
+            params={"stdout": "true", "stderr": "true", "tail": str(tail)},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        # Docker log stream has an 8-byte header per frame; strip it for plain text.
+        raw = resp.content
+        lines: list[str] = []
+        offset = 0
+        while offset < len(raw):
+            if offset + 8 > len(raw):
+                # Remaining bytes don't form a full header — treat as raw text
+                lines.append(raw[offset:].decode("utf-8", errors="replace"))
+                break
+            frame_size = int.from_bytes(raw[offset + 4 : offset + 8], "big")
+            payload = raw[offset + 8 : offset + 8 + frame_size]
+            lines.append(payload.decode("utf-8", errors="replace"))
+            offset += 8 + frame_size
+        return "".join(lines)
 
 
 def find_container_by_identifier(
@@ -287,10 +334,9 @@ def register_docker_tool(mcp: FastMCP) -> None:
 
             if action == "logs":
                 actual_id = await _resolve_container_id(container_id or "")
-                data = await make_graphql_request(
-                    QUERIES["logs"], {"id": actual_id, "tail": tail_lines}
-                )
-                return {"logs": _safe_get(data, "docker", "logs")}
+                docker_id = _extract_docker_id(actual_id)
+                logs = await _fetch_logs_via_docker_api(docker_id, tail=tail_lines)
+                return {"logs": logs}
 
             if action == "networks":
                 data = await make_graphql_request(QUERIES["networks"])

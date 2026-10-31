@@ -36,7 +36,8 @@ QUERIES: dict[str, str] = {
     "warnings": """
         query GetWarningsAndAlerts {
           notifications {
-            warningsAndAlerts { id title subject description importance type timestamp }
+            warnings: list(filter: { type: UNREAD, importance: WARNING, offset: 0, limit: 50 }) { id title subject description importance type timestamp }
+            alerts: list(filter: { type: UNREAD, importance: ALERT, offset: 0, limit: 50 }) { id title subject description importance type timestamp }
           }
         }
     """,
@@ -153,7 +154,7 @@ def register_notifications_tool(mcp: FastMCP) -> None:
             if action == "warnings":
                 data = await make_graphql_request(QUERIES["warnings"])
                 notifications = data.get("notifications", {})
-                result = notifications.get("warningsAndAlerts", [])
+                warnings = notifications.get("warnings", []) or []; alerts = notifications.get("alerts", []) or []; result = (warnings if isinstance(warnings, list) else []) + (alerts if isinstance(alerts, list) else [])
                 return {"warnings": list(result) if isinstance(result, list) else []}
 
             if action == "create":
